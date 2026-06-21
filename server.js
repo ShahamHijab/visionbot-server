@@ -1,6 +1,6 @@
 // 💻 LAPTOP SERVER - Receive alerts from robot, serve to phone
 // Run: node server.js
-
+const admin = require('firebase-admin');
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
@@ -8,7 +8,27 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
+let firebaseReady = false;
+const FCM_TOPIC = process.env.FCM_TOPIC || 'visionbot_alerts';
 
+try {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
+    const serviceAccount = JSON.parse(
+      Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 'base64').toString('utf8')
+    );
+
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+
+    firebaseReady = true;
+    console.log('✅ Firebase Admin ready');
+  } else {
+    console.log('⚠️ FIREBASE_SERVICE_ACCOUNT_BASE64 missing');
+  }
+} catch (e) {
+  console.log('❌ Firebase setup error:', e.message);
+}
 // Middleware
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
@@ -96,9 +116,43 @@ app.post('/api/robot/status', (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+async function sendNotification(alert) {
+  if (!firebaseReady) {
+    console.log('⚠️ Firebase not ready, notification skipped');
+    return;
+  }
 
+  try {
+    const title = alert.title || 'VisionBot Alert';
+    const body = alert.message || `${alert.type || 'Alert'} detected by VisionBot`;
+
+    const response = await admin.messaging().send({
+      topic: FCM_TOPIC,
+      notification: {
+        title: title,
+        body: body,
+      },
+      data: {
+        alert_id: String(alert.alert_id || ''),
+        type: String(alert.type || 'alert'),
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          channelId: 'visionbot_alerts',
+          priority: 'high',
+          defaultSound: true,
+        },
+      },
+    });
+
+    console.log('🔔 Notification sent:', response);
+  } catch (e) {
+    console.log('❌ Notification error:', e.message);
+  }
+}
 /// POST /api/robot/alerts
-app.post('/api/robot/alerts', (req, res) => {
+app.post('/api/robot/alerts', async (req, res) => {
   try {
     const { alerts: newAlerts } = req.body;
 
@@ -115,12 +169,17 @@ app.post('/api/robot/alerts', (req, res) => {
     for (const alert of newAlerts) {
       const exists = allAlerts.find((a) => a.alert_id === alert.alert_id);
       if (!exists) {
-        allAlerts.push({
-          ...alert,
-          receivedAt: new Date().toISOString(),
-          deliveredToPhone: false,
-        });
-        console.log(`   ✅ ${alert.alert_id}`);
+        const savedAlert = {
+  ...alert,
+  receivedAt: new Date().toISOString(),
+  deliveredToPhone: false,
+};
+
+allAlerts.push(savedAlert);
+
+await sendNotification(savedAlert);
+
+console.log(`   ✅ ${alert.alert_id}`);
       }
     }
 
@@ -236,7 +295,12 @@ app.get('/api/phone/status', (req, res) => {
 
 /// GET /health
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', time: new Date() });
+  res.json({
+    status: 'ok',
+    firebaseReady,
+    topic: FCM_TOPIC,
+    time: new Date(),
+  });
 });
 
 /// GET /api/stats
@@ -281,7 +345,22 @@ const getLocalIP = () => {
 };
 
 const localIP = getLocalIP();
+app.post('/api/test-notification', async (req, res) => {
+  const testAlert = {
+    alert_id: 'test_' + Date.now(),
+    type: 'test',
+    title: 'VisionBot Test',
+    message: 'Notification system is working',
+  };
 
+  await sendNotification(testAlert);
+
+  res.json({
+    success: true,
+    firebaseReady,
+    topic: FCM_TOPIC,
+  });
+});
 app.listen(PORT, '0.0.0.0', () => {
   console.log('');
   console.log('╔═══════════════════════════════════╗');
